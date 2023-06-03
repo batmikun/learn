@@ -117,19 +117,22 @@ function sum_char_codes(n: string): number {
 ```
 
 ## DataStructure - Arrays
+
+1 byte -> 8bits
+
 Is a contigious space in memory. Which contain certain amount of bytes.
 When we tell the computer to store for example an array of 3 u32 
 ~~~
 a = u32[3]
 ~~~
-The computer separetes an space in memory large enough that three u32 enters. And when we do
+The computer separetes an space in memory large enough that three u32(4bytes each) enters. And when we do
 ~~~
 a[0]
 ~~~
 We are telling the computer to look in the memory space of a and look in the offset 0
 0 x TheBytesThatOccupiesAu32 tells the computer how much 01 grab from that memory space
 
-This is the most basic definition of an Array. So for example, in typescript we call array to this a = [] and this is not an array
+This is the most basic definition of an Array. So for example, in typescript we call array to this a = [] and this is not an array because has other behavious
 
 
 # Books
