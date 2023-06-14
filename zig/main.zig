@@ -2345,3 +2345,669 @@ pub fn makeLamas() void {
 // time contexts and Zig's aggressive evaluation of any
 // expression it can figure out at compile time, it's sometimes
 // surprising how few places actually need the keyword.
+
+// STANDARD PATTERNS
+
+// ALLOCATORS
+// The zig standar library provides a pattern for allocating memory, which allows the programmer to choose exactly how memory allocations are done within the standar library - no allocations happen behind your back in the standard library
+
+// The most basic allocator is std.heap.page_allocator. Whenever this allocator makes an allocation it will ask your OS for entire pages of memory, an allocation of a single byte will likely reserver multiple kibibytes. As asking for the OS for memory requires a system call this is also extemely inefficient for spped.
+
+// Here we allocate 100 bytes as a []u8. Notice how defer is used in conjunction with a free - this is a common pattern for memory management in Zig
+test "allocation" {
+    const allocator = std.heap.page_allocator;
+
+    const memory = try allocator.alloc(u8, 100);
+    defer allocator.free(memory);
+
+    try expect(memory.len == 100);
+    try expect(@TypeOf(memory) == []u8);
+}
+
+// The std.heap.FixedBufferAllocator is an allocator that allocates memory into a fixed buffer, and does not make any heap allocations. This is useful when heap usage is not wanted, for example when writing a kernel. It may also be considered for performance reasons. It will give you the error OutOfMemory if it has run out of bytes.
+test "fixed buffer allocator" {
+    var buffer: [1000]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const allocator = fba.allocator();
+
+    const memory = try allocator.alloc(u8, 100);
+    defer allocator.free(memory);
+
+    try expect(memory.len == 100);
+    try expect(@TypeOf(memory) == []u8);
+}
+
+// std.heap.ArenaAllocator takes in a child allocator, and allows you to allocate many times and only free once. Here, .deinit() is calld on the arena which frees all memory. Using allocator.free in in this example would be a no-op (i.e does nothing).
+test "arena allocator" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try allocator.alloc(u8, 1);
+    _ = try allocator.alloc(u8, 10);
+    _ = try allocator.alloc(u8, 100);
+}
+
+// alloc and free are used for slices. For single items, consider using create and destroy
+test "allocator create/destroy" {
+    const byte = try std.heap.page_allocator.create(u8);
+    defer std.heap.page_allocatr.destroy(byte);
+    byte.* = 128;
+}
+
+// The Zig standard library also has a general purpose allocator. This is a safe allocator which can prevent double-free, use-after-free and can detect leaks. Safety checks and thread safety can be turned of via its configuration struct. Zig's GPA is designed for safety over performance, but may still be many times faster than page_allocator.
+test "GPA" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    defer {
+        const deinit_status = gpa.deinit();
+
+        if (deinit_status == .leak) expect(false) catch @panic("TEST FAIL");
+    }
+
+    const bytes = try allocator.alloc(u8, 100);
+    defer allocator.free(bytes);
+}
+
+// For high performance (but very few safety features), std.heap.c_allocator may be considered. This however has the disadvantage of requiring lniking libc, which can be done with -lc.
+
+// ARRAYLIST
+/// The std.Arraylist is commonly used throughout Zig, and serves as a buffer which can change in size. std.ArrayList(T) is similar to C++'s std::vector<T> and Rust's Vec<T>. The deinit method frees all of the ArrayList's memory. The memory can be read from and written to via its slice field - .items
+
+// Here we will introduce the usage of the testing allocator. This is a special allocator that only works in tests, and can detect memory leaks. In your code, use whatever allocator is appropiate.
+const ArrayList = std.ArrayList;
+const test_allocator = std.testing.allocator;
+
+test "arraylist" {
+    var list = ArrayList(u8).init(test_allocator);
+    defer list.deinit();
+
+    try list.append('H');
+    try list.append('e');
+    try list.append('l');
+    try list.append('l');
+    try list.append('o');
+    try list.appendsSlice(" World!");
+
+    try expect(eql(u8, list.items, "Hello World!"));
+}
+
+// FILESYSTEM
+// Lets create and open a file in our current working directory,write to it, and then read from it. Here we have to use .seekTo i order to go back to the start of the file before reading what we haven written.
+test "createFiel, write, seekTo, read" {
+    const file = try std.fs.cwd().createFile(
+        "junk_file.txt",
+        .{ .read = true },
+    );
+    defer file.close();
+
+    const bytes_written = try file.writeAll("Hello File!");
+    _ = bytes_written;
+
+    var buffer: [100]u8 = undefined;
+    try file.seekTo(0);
+    const bytes_read = try file.readAll(&buffer);
+
+    try expect(eql(u8, buffer[0..bytes_read], "Hello File!"));
+}
+
+// The functions td.fs.openFileAbsolute and similar absolute functions exist, but we will not test them here.
+
+// We can get various information about files by using .stat() on them. Stat also contains fields for .inode and .mode, but they are not tested here as they rely on the current OS'types.
+test "file sta" {
+    const file = try std.fs.cwd().createFile(
+        "junk_file2.txt",
+        .{ .read = true },
+    );
+    defer file.close();
+
+    const stat = try file.stat();
+
+    try expect(stat.size == 0);
+    try expect(stat.kind == .File);
+    try expect(stat.ctime == std.time.nanoTimestamp());
+    try expect(stat.mtime == std.time.nanoTimestamp());
+    try expect(stat.atime == std.time.nanoTimestamp());
+}
+
+// We can make directories and iterate over their contents. Here we will use an iterator. This directory (and its contents) will be deleted after this test finishes.
+test "make dir" {
+    try std.fs.cwd().makeDir("test-tmp");
+    const iter_dir = try std.fs.cwd().openIterableDir(
+        "test-tmp",
+        .{},
+    );
+    defer {
+        std.fs.cwd().deleteTree("test-tmp") catch unreachable;
+    }
+
+    _ = try iter_dir.dir.createFile("x", .{});
+    _ = try iter_dir.dir.createFile("y", .{});
+    _ = try iter_dir.dir.createFile("z", .{});
+
+    var file_count: usize = 0;
+    var iter = iter_dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind == .File) file_count += 1;
+    }
+
+    try expect(file_count == 3);
+}
+
+// READERS AND WRITERS
+// std.io.Writer and std.io.Reader provide standard ways of making use of IO. std.ArrayList(u8) has a writer method which gives us a writter.
+test "io writter usage" {
+    var list = ArrayList(u8).init(test_allocator);
+    defer list.deinit();
+    const bytes_written = try list.writer().write(
+        "Hello World!",
+    );
+    try expect(bytes_written == 12);
+    try expect(eql(u8, list.items, "Hello World!"));
+}
+
+// Here we will use a redear to copy the file's contents into an allocated buffer. The second argument of readAllAlloc is the maximum size that it may allocate; if the file is larger than this, it will return error.StreamTooLong.
+test "io reader usage" {
+    const message = "Hello File!";
+
+    const file = try std.fs.cwd().createFile(
+        "junk_file2.txt",
+        .{ .read = true },
+    );
+    defer file.close();
+
+    try file.writeAll(message);
+    try file.seekTo(0);
+
+    const contents = try file.reader().readAllAlloc(
+        test_allocator,
+        message.len,
+    );
+    defer test_allocator.free(contents);
+
+    try expect(eql(u8, contents, message));
+}
+
+// A common usecase for readers is to read until the next line(e.g for user input). Here we will do this with the std.io.getStdIn() file.
+fn nextLine(reader: anytype, buffer: []u8) !?[]const u8 {
+    var line = (try reader.readUntilDelimiterOrEof(
+        buffer,
+        '\n',
+    )) orelse return null;
+
+    if (@import("builtin").os.tag == .windows) {
+        return std.mem.trimRight(u8, line, "/r");
+    } else {
+        return line;
+    }
+}
+
+test "read until next line" {
+    const stdout = std.io.getStdOut();
+    const stdin = std.io.getStdIn();
+
+    try stdout.writeall(
+        \\ Enter your name:
+    );
+
+    var buffer: [100]u8 = undefined;
+    const input = (try nextLine(stdin.reader(), &buffer)).?;
+    try stdout.writer().print(
+        "Your name is: \"{s}\"\n",
+        .{input},
+    );
+}
+
+// An std.io.Writer type consists of a context type, error set, and a write function. The write function msut take in the context and a byte slice. The write function must also return an error union of the writer type's error set and the amount of bytes written. Let's create a type that implements a writer
+const MyByteList = struct {
+    data: [100]u8 = undefined,
+    items: []u8 = &[_]u8{},
+
+    const Writer = std.io.Writer(
+        *MyByteList,
+        error{EndOfBuffer},
+        appendWrite,
+    );
+
+    fn appendWrite(
+        self: *MyByteList,
+        data: []const u8,
+    ) error{EndOfBuffer}!usize {
+        if (self.items.len + data.len > self.data.len) {
+            return error.EndOfBuffer;
+        }
+        std.mem.copy(
+            u8,
+            self.data[self.items.len..],
+            data,
+        );
+        self.items = self.data[0 .. self.items.len + data.len];
+        return data.len;
+    }
+
+    fn writer(self: *MyByteList) Writer {
+        return .{ .context = self };
+    }
+};
+
+test "custom writer" {
+    var bytes = MyByteList{};
+    _ = try bytes.writer().write("Hello");
+    _ = try bytes.writer().write(" Writer!");
+    try expect(eql(u8, bytes.items, "Hello Writer!"));
+}
+
+// FORMATING
+// std.fmt provides ways to format data to and from strings.
+
+// A basic example of creating a formatted string. The format string must be compile time known. The d here denotes that we want a decimal number.
+test "fmt" {
+    const string = try std.fmt.allocPrint(
+        test_allocator,
+        "{d} + {d} = {d}",
+        .{ 9, 10, 19 },
+    );
+    defer test_allocator.free(string);
+
+    try expect(eql(u8, string, "9 + 10 = 19"));
+}
+
+// Writers conveniently have a print method, which works similarly.
+test "print" {
+    var list = std.ArrayList(u8).init(test_allocator);
+    defer list.deinit();
+    try list.writer().print(
+        "{} + {} = {}",
+        .{ 9, 10, 19 },
+    );
+    try expect(eql(u8, list.items, "9 + 10 = 10"));
+}
+
+// Take a moment to appreciate that you now know from top to bottom how printing hello world works. std.debug.print works the same, except it writes to stderr and is protected by a mutex.
+test "hello world" {
+    const out_file = std.io.getStdOut();
+    try out_file.writer().print(
+        "Hello, {s}!\n",
+        .{"World"},
+    );
+}
+
+// We have used the {s} format specifier up until this point to print strings. Here we will use {any}, which gives us the default formatting.
+test "array printing" {
+    const string = try std.fmt.allocPrint(
+        test_allocator,
+        "{any} + {any} = {any}",
+        .{
+            @as([]const u8, &[_]u8{ 1, 4 }),
+            @as([]const u8, &[_]u8{ 2, 5 }),
+            @as([]const u8, &[_]u8{ 3, 9 }),
+        },
+    );
+    defer test_allocator.free(string);
+
+    try expect(eql(
+        u8,
+        string,
+        "{ 1, 4 } + { 2, 5 } = { 3, 9 }",
+    ));
+}
+
+// Let’s create a type with custom formatting by giving it a format function. This function must be marked as pub so that std.fmt can access it (more on packages later). You may notice the usage of {s} instead of {} - this is the format specifier for strings (more on format specifiers later). This is used here as {} defaults to array printing over string printing.
+const Person = struct {
+    name: []const u8,
+    birth_year: i32,
+    death_year: ?i32,
+    pub fn format(
+        self: Person,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        try writer.print("{s} ({}-", .{
+            self.name, self.birth_year,
+        });
+
+        if (self.death_year) |year| {
+            try writer.print("{}", .{year});
+        }
+
+        try writer.writeAll(")");
+    }
+};
+
+test "custom fmt" {
+    const john = Person{
+        .name = "John Carmack",
+        .birth_year = 1970,
+        .death_year = null,
+    };
+
+    const john_string = try std.fmt.allocPrint(
+        test_allocator,
+        "{s}",
+        .{john},
+    );
+    defer test_allocator.free(john_string);
+
+    try expect(eql(
+        u8,
+        john_string,
+        "John Carmack (1970-)",
+    ));
+
+    const claude = Person{
+        .name = "Claude Shannon",
+        .birth_year = 1916,
+        .death_year = 2001,
+    };
+
+    const claude_string = try std.fmt.allocPrint(
+        test_allocator,
+        "{s}",
+        .{claude},
+    );
+    defer test_allocator.free(claude_string);
+
+    try expect(eql(
+        u8,
+        claude_string,
+        "Claude Shannon (1916-2001)",
+    ));
+}
+
+// RANDOM NUMBERS
+test "random number" {
+    var prng = std.rand.DefaultPrng.init(blk: {
+        var seed: u64 = undefined;
+        try std.os.getrandom(std.mem.asBytes(&seed));
+        break :blk seed;
+    });
+
+    const rand = prng.random();
+
+    const a = rand.float(f32);
+    const b = rand.boolean(f32);
+    const c = rand.int(f32);
+    const d = rand.intRangeAtMost(u8, 0, 255);
+
+    _ = .{ a, b, c, d };
+}
+
+// Cryptographically secure random is also available
+test "crypto random numbers" {
+    const rand = std.crypto.random;
+
+    const a = rand.float(f32);
+    const b = rand.boolean();
+    const c = rand.int(u8);
+    const d = rand.intRangeAtMost(u8, 0, 255);
+
+    //suppress unused constant compile error
+    _ = .{ a, b, c, d };
+}
+
+// Threads
+// while Zig provides more advanced ways of writing concurrent and paarllel code, std.Thread is available for making use of OS threads. Let's make use of an OS thread.
+fn ticker(step: u8) void {
+    while (true) {
+        std.time.sleep(1 * std.time.ns_per_s);
+        tick += @as(isize, step);
+    }
+}
+
+var tick: isize = 0;
+
+test "threading" {
+    var thread = try std.Thread.spawn(.{}, ticker, .{@as(u8, 1)});
+    _ = thread;
+
+    try expect(tick == 0);
+    std.tie.sleep(3 * std.time.ns_per_s / 2);
+    try expect(tick == 1);
+}
+// Threads, however, aren't particularly useful without strategies for thread safety
+
+// HASH MAPS
+// The standard library provides std.AutoHashMap, which lets you easily create a hash map type from a key type and a value type. These must be initiated with an allocator.
+test "hashing" {
+    const Point = struct { x: i32, y: i32 };
+
+    var map = std.AutoHashMap(u32, Point).init(test_allocator);
+    defer map.deinit();
+
+    try map.put(1525, .{ .x = 1, .y = -4 });
+    try map.put(1565, .{ .x = 2, .y = -3 });
+    try map.put(1585, .{ .x = 3, .y = -2 });
+    try map.put(1625, .{ .x = 4, .y = -1 });
+
+    try expect(map.count() == 4);
+
+    var sum = Point{ .x = 0, .y = 0 };
+    var iterator = map.iterator();
+
+    while (iterator.next()) |entry| {
+        sum.x += entry.value_ptr.x;
+        sum.y += entry.value_ptr.y;
+    }
+
+    try expect(sum.x == 10);
+    try expect(sum.y == -10);
+}
+
+// .fetchPut puts a value in the hash map, returning a value if there was previously a value for that key.
+test "fetchPut" {
+    var map = std.AutoHashMap(u8, f32).init(
+        test_allocator,
+    );
+    defer map.deinit();
+
+    try map.put(255, 10);
+    const old = try map.fetchPut(255, 100);
+
+    try expect(old.?.value == 10);
+    try expect(map.get(255).? == 100);
+}
+
+// std.StringHashMap is also provided for when you need strings as keys.
+test "string hasmap" {
+    var map = std.StringHashMap(enum { cool, uncool }).init(test_allocator);
+    defer map.deinit();
+
+    try map.put("loris", .uncool);
+    try map.put("me", .cool);
+
+    try expect(map.get("me").? == .cool);
+    try expect(map.get("loris").? == .uncool);
+}
+
+// std.StringHashMap and std.AutoHashMap are just wrappers for std.HashMap. If these two do not fulfil your needs, using std.HashMap directly gives you much more control.
+
+// If having your elements backed by an array is wanted behaviour, try std.ArrayHashMap and its wrapper std.AutoArrayHashMap.
+
+// ITERATOR
+// Its a common idiom to have a struct type with a next function with an optional in its return type, so that the function may return a null to indicate tat iteration is finishd.
+
+// std.mem.SplitIterator is an example of this pattern
+test "split iterator" {
+    const text = "robust, optimal, reusable, maintainable, ";
+    var iter = std.mem.split(u8, text, ", ");
+    try expect(eql(u8, iter.next().?, "robust"));
+    try expect(eql(u8, iter.next().?, "optimal"));
+    try expect(eql(u8, iter.next().?, "reusable"));
+    try expect(eql(u8, iter.next().?, "maintainable"));
+    try expect(eql(u8, iter.next().?, ""));
+    try expect(iter.next() == null);
+}
+
+// Some iterators have a !?T return type, as opposed to ?T. !?T requires that we unpack the error union before the optional, meaning that the work done to get to the next iteration may error. Here is an example of doing this with a loop. cwd has to be opened with iterate permissions in order for the directory iterator to work.
+test "iterator looping" {
+    var iter = (try std.fs.cwd().openIterableDir(
+        ".",
+        .{},
+    )).iterate();
+
+    var file_count: usize = 0;
+    while (try iter.next()) |entry| {
+        if (entry.kind == .File) file_count += 1;
+    }
+
+    try expect(file_count > 0);
+}
+
+// Custom Iterator
+const ContainsIterator = struct {
+    strings: []const []const u8,
+    needle: []const u8,
+    index: usize = 0,
+    fn next(self: *ContainsIterator) ?[]const u8 {
+        const index = self.index;
+        for (self.strings[index..]) |string| {
+            self.index += 1;
+            if (std.mem.indexOf(u8, string, self.needle)) |_| {
+                return string;
+            }
+        }
+        return null;
+    }
+};
+
+test "custom iterator" {
+    var iter = ContainsIterator{
+        .strings = &[_][]const u8{ "one", "two", "three" },
+        .needle = "e",
+    };
+
+    try expect(eql(u8, iter.next().?, "one"));
+    try expect(eql(u8, iter.next().?, "three"));
+    try expect(iter.next() == null);
+}
+
+// ZIG BUILD
+// The zig build commnd allows users to compile based on a build.zig file. zig init-exe and zig init-lib can be used to give you a baseline project.
+
+// Let's use zig init-exe inside a new folder. This is what you will find.
+// .
+// |-- build.zig
+// |-- src
+//      |-- main.zig
+
+// build.zig contains our build script. The build runner will use this pub fn build function as its entry point - this is what is executed when you run zig build
+const Builder = @import("std").build.Builder;
+
+pub fn build(b: *Builder) void {
+    // Standard target options allows the person running `zig build` to choose
+    // what target to build for. Here we do not override the defaults, which
+    // means any target is allowed, and the default is native. Other options
+    // for restricting supported target set are available.
+    const target = b.standardTargetOptions(.{});
+
+    // Standard optimization options allow the person running `zig build` to select
+    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
+    // set a preferred release mode, allowing the user to decide how to optimize.
+    const optimize = b.standardOptimizeOption(.{});
+
+    const exe = b.addExecutable(.{
+        .name = "init-exe",
+        .root_source_file = .{ .path = "src/main.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // This declares intent for the executable to be installed into the
+    // standard location when the user invokes the "install" step (the default
+    // step when running `zig build`).
+    b.installArtifact(exe);
+
+    const run_cmd = exe.run();
+    run_cmd.step.dependOn(b.getInstallStep());
+
+    const run_step = b.step("run", "Run the app");
+    run_step.dependOn(&run_cmd.step);
+}
+
+// main.zig contains our executable’s entry point.
+// Upon using the zig build command, the executable will appear in the install path. Here we have not specified an install path, so the executable will be saved in ./zig-out/bin.
+
+// BUILDER
+// Zig’s std.Build type contains the information used by the build runner. This includes information such as:
+// the release mode
+// locations of libraries
+// the install path
+// build steps
+
+// COMPILE STEP
+// The std.build.CompileStep type contains information required to build a library, executable, object, or test.
+
+// Let’s make use of our Builder and create a CompileStep using Builder.addExecutable, which takes in a name and a path to the root of the source.
+
+pub fn build2(b: *Builder) void {
+    const exe = b.addExecutable(.{
+        .name = "init-exe",
+        .root_source_file = .{ .path = "src/main.zig" },
+    });
+    b.installArtifact(exe);
+}
+
+// MODULES
+// The Zig build system has the concept of modules, which are other source files written in Zig. Let’s make use of a module.
+
+// From a new folder, run the following commands.
+// zig init-exe
+// mkdir libs
+// cd libs
+// git clone https://github.com/Sobeston/table-helper.git
+// Your directory structure should be as follows.
+//
+// .
+// ├── build.zig
+// ├── libs
+// │   └── table-helper
+// │       ├── example-test.zig
+// │       ├── README.md
+// │       ├── table-helper.zig
+// │       └── zig.mod
+// └── src
+//     └── main.zig
+
+// To your newly made build.zig, add the following lines.
+// const table_helper = b.addModule("table-helper", .{
+//     .source_file = .{ .path = "libs/table-helper/table-helper.zig" }
+// });
+// exe.addModule("table-helper", table_helper);
+
+// Now when run via zig build, @import inside your main.zig will work with the string “table-helper”. This means that main has the table-helper package. Packages (type std.build.Pkg) also have a field for dependencies of type ?[]const Pkg, which is defaulted to null. This allows you to have packages which rely on other packages.
+//
+// Place the following inside your main.zig and run zig build run.
+const Table = @import("table-helper").Table;
+
+pub fn main3() !void {
+    try std.io.getStdOut().writer().print("{}\n", .{
+        Table(&[_][]const u8{ "Version", "Date" }){
+            .data = &[_][2][]const u8{
+                .{ "0.7.1", "2020-12-13" },
+                .{ "0.7.0", "2020-11-08" },
+                .{ "0.6.0", "2020-04-13" },
+                .{ "0.5.0", "2019-09-30" },
+            },
+        },
+    });
+}
+
+// BUILD STEPS
+// Are a way of providing tasks for the build runner to execute. Let’s create a build step, and make it the default. When you run zig build this will output Hello!.
+
+pub fn build3(b: *std.build.Builder) void {
+    const step = b.step("task", "do something");
+    step.makeFn = myTask;
+    b.default_step = step;
+}
+
+fn myTask(self: *std.build.Step, progress: *std.Progress.Node) !void {
+    std.debug.print("Hello!\n", .{});
+    _ = progress;
+    _ = self;
+}
+// We called b.installArtifact(exe) earlier - this adds a build step which tells the builder to build the executable.
